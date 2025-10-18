@@ -1,0 +1,13 @@
+B3-pipeline/logs/
+
+B3-pipeline/plugins/
+
+B3-pipeline/dags/*.csv
+
+# Ignora os arquivos de banco de dados do DuckDB (ainda não presentes).
+B3-pipeline/*.duckdb
+B3-pipeline/*.duckdb.wal
+
+# Ignora as pastas de cache do Python em qualquer lugar do projeto.
+**/__pycache__/
+*.pyc
