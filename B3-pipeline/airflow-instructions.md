@@ -20,4 +20,4 @@ senha: admin
 
 Caso o formulário retorne credenciais incorretas, rode o comando abaixo apra criar um usuário administrador com essas credenciais.
 
-`ocker-compose exec airflow-scheduler airflow users create -r Admin -u admin -e admin@example.com -f admin -l user -p admin`
+`docker-compose exec airflow-scheduler airflow users create -r Admin -u admin -e admin@example.com -f admin -l user -p admin`
