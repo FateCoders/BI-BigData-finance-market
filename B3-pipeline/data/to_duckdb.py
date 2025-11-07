@@ -5,88 +5,59 @@ import pyarrow.parquet as pq
 import unicodedata
 
 parquet_path = "B3-pipeline/data/ibov_dados_brutos.parquet"
-duckdb_path = "B3-pipeline/data/ibov_limpo.duckdb"
-backup_parquet = "B3-pipeline/data/ibov_limpo_backup.parquet"
+duckdb_path = "ibov_limpo.duckdb"
 
+import pandas as pd
+import duckdb
+import pyarrow.parquet as pq
+import os
 
-def normalizar_nome_coluna(nome):
-    nome = nome.strip().lower()
-    nome = "".join(
-        c for c in unicodedata.normalize("NFD", nome)
-        if unicodedata.category(c) != "Mn"
-    )
-    nome = nome.replace(" ", "_").replace("-", "_")
-    return nome
-
-
-def limpar_dataframe(df: pd.DataFrame):
-    df.columns = [normalizar_nome_coluna(c) for c in df.columns]
+def parquet_to_duckdb(parquet_file_path, duckdb_file_path='data.db', table_name='my_table', decimal_places=2):
+    """
+    Carrega um arquivo .parquet, limpa os dados (remove linhas com NaN em colunas numéricas, 
+    formata colunas float64 para arredondar doubles), e insere em uma tabela DuckDB.
     
-    for col in df.columns:
-        if df[col].dtype == object:
-            try:
-                df[col] = (
-                    df[col]
-                    .astype(str)
-                    .str.replace(",", ".", regex=False)
-                    .str.replace(" ", "", regex=False)
-                )
-                df[col] = pd.to_numeric(df[col], errors="ignore")
-            except Exception:
-                pass
+    :param parquet_file_path: Caminho para o arquivo .parquet
+    :param duckdb_file_path: Caminho para o arquivo DuckDB (criado se não existir)
+    :param table_name: Nome da tabela no DuckDB
+    :param decimal_places: Número de casas decimais para arredondar doubles (padrão: 2)
+    """
     
-    for col in df.columns.copy():
-        if pd.api.types.is_datetime64_any_dtype(df[col]):
-            base = col
-            df[f"{base}_ano"] = df[col].dt.year
-            df[f"{base}_mes"] = df[col].dt.month
-            df[f"{base}_dia"] = df[col].dt.day
-            if not (df[col].dt.hour == 0).all():
-                df[f"{base}_hora"] = df[col].dt.hour
-            df = df.drop(columns=[col])
-        else:
-            try:
-                temp = pd.to_datetime(df[col], errors="raise")
-                if temp.notna().sum() > 0:
-                    base = col
-                    df[f"{base}_ano"] = temp.dt.year
-                    df[f"{base}_mes"] = temp.dt.month
-                    df[f"{base}_dia"] = temp.dt.day
-                    if not (temp.dt.hour == 0).all():
-                        df[f"{base}_hora"] = temp.dt.hour
-                    df = df.drop(columns=[col])
-            except Exception:
-                pass
-    df = df.dropna(axis=1, how="all")
+    print(f"Lendo arquivo Parquet: {parquet_file_path}")
+    parquet_table = pq.read_table(parquet_file_path)
+    df = parquet_table.to_pandas()
     
-    for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            df[col] = df[col].fillna(0)
-        else:
-            df[col] = df[col].fillna("")
+    print(f"DataFrame carregado com {df.shape[0]} linhas e {df.shape[1]} colunas.")
     
-    return df
+    numeric_cols = df.select_dtypes(include=['float64', 'float32', 'int64', 'int32']).columns
+    df.dropna(subset=numeric_cols, inplace=True)
+    
+    float_cols = df.select_dtypes(include=['float64', 'float32']).columns
+    if len(float_cols) > 0:
+        print(f"Formatando {len(float_cols)} colunas float para {decimal_places} casas decimais.")
+        df[float_cols] = df[float_cols].round(decimal_places)
+    
+    df.drop_duplicates(inplace=True)
+    
+    print(f"Após limpeza: {df.shape[0]} linhas restantes.")
+    
+    con = duckdb.connect(database=duckdb_file_path, read_only=False)
+    
+    con.register('df_view', df)
+    
+    con.execute(f"CREATE TABLE IF NOT EXISTS {table_name} AS SELECT * FROM df_view;")
+    
+    
+    con.close()
+    
+    print(f"Dados inseridos com sucesso na tabela '{table_name}' do banco DuckDB: {duckdb_file_path}")
+    
+    con = duckdb.connect(database=duckdb_file_path, read_only=True)
+    result = con.execute(f"SELECT * FROM {table_name} LIMIT 5;").fetchdf()
+    con.close()
+    
+    print("Amostra dos dados no DuckDB:")
+    print(result)
 
 
-def salvar_duckdb(df, duckdb_path):
-    if os.path.exists(duckdb_path):
-        try:
-            conn = duckdb.connect(duckdb_path)
-            conn.close()
-        except Exception:
-            os.remove(duckdb_path)
-            print("Banco corrompido removido e recriado.")
-    conn = duckdb.connect(duckdb_path)
-    conn.execute("CREATE OR REPLACE TABLE ibov_limpo AS SELECT * FROM df")
-    conn.close()
-
-
-table = pq.read_table(parquet_path)
-df = table.to_pandas()
-df = limpar_dataframe(df)
-
-df.to_parquet(backup_parquet, index=False)
-salvar_duckdb(df, duckdb_path)
-
-print(f"Dados limpos e salvos em {duckdb_path}")
-print(f"Backup salvo em {backup_parquet}")
+parquet_to_duckdb(parquet_path, duckdb_path, table_name="ibov_limpo")
