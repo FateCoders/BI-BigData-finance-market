@@ -6,7 +6,7 @@ import logging
 import os
 
 @dag(
-    dag_id="pipeline_b3_yfinance",
+    dag_id="pipeline_yfinance_to_parquet",
     description="Coleta dados do Yahoo Finance (ex: IBOV)",
     start_date=datetime(2025, 10, 27),
     schedule="@daily",

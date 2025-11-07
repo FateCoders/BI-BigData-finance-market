@@ -1,6 +1,6 @@
 import duckdb
 
-conn = duckdb.connect("ibov_limpo.duckdb")
+conn = duckdb.connect("../data/ibov_limpo.duckdb")
 
 print(conn.execute("SHOW TABLES").fetchdf())
 
