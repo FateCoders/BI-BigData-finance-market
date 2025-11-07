@@ -91,8 +91,9 @@ Abra seu navegador e acesse o endereço que aparece no terminal, geralmente:
 http://127.0.0.1:8050/
 
 ## **Estrutura do Projeto**
-
+```sh
 analise-do-mercado-financeiro/  
 ├── app.py            \# Script principal da aplicação Dash  
 ├── requirements.txt  \# Lista de dependências (recomendado)  
 └── README.md         \# Este arquivo  
+```
