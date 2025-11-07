@@ -1,0 +1,17 @@
+{
+    "sqltools.useNodeRuntime": true,
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "DuckDB",
+            "database": "${workspaceFolder:BI-BigData-finance-market}/B3-pipeline/data/ibov_limpo.duckdb",
+            "name": "ibov_limpo.duckdb"
+        },
+        {
+            "previewLimit": 50,
+            "driver": "DuckDB",
+            "database": "${workspaceFolder:BI-BigData-finance-market}/ibov_limpo.duckdb",
+            "name": "B3-pipeline/data/ibov_limpo.duckdb"
+        }
+    ]
+}
