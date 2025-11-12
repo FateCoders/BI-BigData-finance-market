@@ -1,20 +1,30 @@
 from airflow.decorators import dag, task
-from datetime import datetime
+from airflow.datasets import Dataset
+from datetime import datetime, timedelta
 import yfinance as yf
 import pandas as pd
 import logging
 import os
+
+raw_parquet_dataset = Dataset("file:///opt/airflow/data/ibov_dados_brutos.parquet")
+
+default_args = {
+    'owner': 'airflow',
+    'retries': 2,
+    'retry_delay': timedelta(minutes=5),
+}
 
 @dag(
     dag_id="pipeline_yfinance_to_parquet",
     description="Coleta dados do Yahoo Finance (ex: IBOV)",
     start_date=datetime(2025, 10, 27),
     schedule="@daily",
-    catchup=False
+    catchup=False,
+    default_args=default_args
 )
 def pipeline_b3_yfinance_func():
 
-    @task
+    @task(outlets=[raw_parquet_dataset])
     def extrair_salvar_dados_yfinance():
         pasta_dados = "/opt/airflow/data"
         nome_arquivo = "ibov_dados_brutos.parquet"
