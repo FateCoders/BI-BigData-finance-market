@@ -24,7 +24,7 @@ def construir_url_selic():
     # Pega a data de hoje
     data_hoje = datetime.now()
     # Pega a data de 365 dias atrás
-    data_um_ano_atras = data_hoje - timedelta(days=365)
+    data_um_ano_atras = data_hoje - timedelta(days=1825)
     
     # Formata as datas no padrão DD/MM/AAAA que a API do BCB exige
     data_final_str = data_hoje.strftime('%d/%m/%Y')

@@ -36,7 +36,7 @@ def pipeline_b3_yfinance_func():
             ticker = "^BVSP"
             logging.info(f"Buscando dados para o ticker: {ticker}")
             
-            dados = yf.download(ticker, period="1y")
+            dados = yf.download(ticker, period="5y")
             
             if dados.empty:
                 logging.warning(f"Nenhum dado retornado para {ticker}")
