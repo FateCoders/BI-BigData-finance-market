@@ -4,42 +4,73 @@ from dash import dcc, html, Input, Output, State
 import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
+import requests # <--- ADICIONADO
 
-def create_mock_data():
-    tickers = ['PETR4', 'VALE3', 'ITUB4', 'MGLU3']
-    datas = pd.date_range(start='2022-01-01', end='2024-12-31', freq='B') 
-    df = pd.DataFrame(index=datas)
-    for ticker in tickers:
-        precos_base = np.random.randint(20, 100)
-        retornos_diarios = np.random.normal(loc=0.0005, scale=0.02, size=len(datas))
-        precos = precos_base * (1 + retornos_diarios).cumprod()
-        df[ticker] = precos
-    return df
+# --- INÍCIO DA MODIFICAÇÃO: Carregando dados da API ---
 
-def create_mock_selic_data(datas_index):
-    df_selic = pd.DataFrame(index=datas_index)
-    taxa_diaria_simulada = np.random.normal(loc=0.0004, scale=0.0001, size=len(datas_index))
-    df_selic['valor'] = (taxa_diaria_simulada * 100).round(4).astype(str)
-    df_selic['data'] = df_selic.index.strftime('%d/%m/%Y')
-    df_selic = df_selic.reset_index(drop=True)
-    return df_selic
+# URLs da API (garanta que o docker-compose do B3-pipeline está rodando)
+API_IBOV_URL = "http://localhost:5001/api/ibov"
+API_SELIC_URL = "http://localhost:5001/api/selic"
 
-df_precos = create_mock_data()
+def fetch_api_data(url):
+    """Busca dados da API e retorna um DataFrame."""
+    try:
+        response = requests.get(url)
+        # Gera um erro para status ruins (ex: 404, 500)
+        response.raise_for_status() 
+        data = response.json()
+        df = pd.DataFrame.from_records(data)
+        return df
+    except requests.exceptions.RequestException as e:
+        print(f"ERRO AO ACESSAR API {url}: {e}")
+        print("Certifique-se que o 'docker-compose up' do B3-pipeline está em execução.")
+        return pd.DataFrame() # Retorna DF vazio em caso de erro
+
+# 1. Carregar Dados do IBOV
+print("Carregando dados do IBOV via API...")
+df_ibov = fetch_api_data(API_IBOV_URL)
+if not df_ibov.empty:
+    df_ibov['Date'] = pd.to_datetime(df_ibov['Date'])
+    df_ibov = df_ibov.set_index('Date')
+    # A app espera um DataFrame com tickers como colunas. Usaremos 'Close' do IBOV.
+    # Renomeamos 'Close' para 'IBOV' para ficar claro no dashboard.
+    df_precos = df_ibov[['Close']].rename(columns={'Close': 'IBOV'})
+else:
+    print("ERRO: Não foi possível carregar dados do IBOV. Dashboard pode não funcionar.")
+    df_precos = pd.DataFrame()
+
+# 2. Carregar Dados da SELIC
+print("Carregando dados da SELIC via API...")
+df_selic_raw = fetch_api_data(API_SELIC_URL)
+if not df_selic_raw.empty:
+    # Renomear colunas da API ('Date', 'Value') para bater com a lógica original do script ('data', 'valor')
+    df_selic_raw = df_selic_raw.rename(columns={'Date': 'data', 'Value': 'valor'})
+    
+    # Processamento da SELIC (lógica mantida do script original)
+    df_selic = df_selic_raw.copy()
+    df_selic['data'] = pd.to_datetime(df_selic['data']) # API já retorna ISO
+    df_selic = df_selic.set_index('data')
+    # A API retorna o valor percentual (ex: 0.0419), dividimos por 100 para ter o retorno diário
+    df_selic['retorno_diario'] = pd.to_numeric(df_selic['valor']) / 100
+    retornos_selic_global = df_selic['retorno_diario']
+    dias_uteis = 252
+    taxa_selic_anual_mock = retornos_selic_global.mean() * dias_uteis # Renomeado para 'taxa_selic_anual'
+else:
+    print("ERRO: Não foi possível carregar dados da SELIC. Benchmark pode não funcionar.")
+    retornos_selic_global = pd.Series(dtype=float)
+    taxa_selic_anual_mock = 0.0 # Renomeado para 'taxa_selic_anual'
+
+# 3. Calcular Retornos (lógica mantida)
 df_retornos = df_precos.pct_change().dropna()
+disponiveis_lista = df_precos.columns # Agora será apenas ['IBOV']
 
-disponiveis_lista = df_precos.columns
+# --- FIM DA MODIFICAÇÃO ---
 
-df_selic_mock = create_mock_selic_data(df_precos.index)
-df_selic = df_selic_mock.copy()
-df_selic['data'] = pd.to_datetime(df_selic['data'], format='%d/%m/%Y')
-df_selic = df_selic.set_index('data')
-df_selic['retorno_diario'] = pd.to_numeric(df_selic['valor']) / 100
-retornos_selic_global = df_selic['retorno_diario']
-dias_uteis = 252
-taxa_selic_anual_mock = retornos_selic_global.mean() * dias_uteis
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.BOOTSTRAP])
 server = app.server
+
+# Atualiza a lista de ações disponíveis (agora só tem IBOV)
 acoes_disponiveis = [{'label': t, 'value': t} for t in disponiveis_lista]
 
 app.layout = dbc.Container([
@@ -49,10 +80,11 @@ app.layout = dbc.Container([
         dbc.Col(
             dbc.Card(
                 [
-                    dbc.CardHeader([html.I(className="bi bi-archive-fill me-2"), "Ativos Disponíveis para Simulação"]),
+                    dbc.CardHeader([html.I(className="bi bi-archive-fill me-2"), "Ativos Disponíveis (Via API)"]),
                     dbc.CardBody(
                         [
-                            html.Span([dbc.Badge(ticker, color="secondary", className="me-2 mb-2") for ticker in disponiveis_lista])
+                            # Atualizado para mostrar o ativo da API
+                            html.Span([dbc.Badge(ticker, color="primary", className="me-2 mb-2") for ticker in disponiveis_lista])
                         ]
                     )
                 ],
@@ -77,18 +109,18 @@ app.layout = dbc.Container([
                                         dcc.Dropdown(
                                             id='stock-selector',
                                             options=acoes_disponiveis,
-                                            value=['PETR4', 'VALE3'],
+                                            value=['IBOV'], # <--- MODIFICADO (Default é IBOV)
                                             multi=True
                                         )
                                     ], md=5
                                 ),
                                 dbc.Col(
                                     [
-                                        html.Label("Defina os Pesos (ex: 0.5, 0.5):", className="form-label"),
+                                        html.Label("Defina os Pesos (ex: 1.0):", className="form-label"),
                                         dcc.Input(
                                             id='weight-inputs',
                                             type='text',
-                                            value='0.5, 0.5',
+                                            value='1.0', # <--- MODIFICADO (Default é 1.0)
                                             className="form-control"
                                         )
                                     ], md=4
@@ -186,6 +218,10 @@ app.layout = dbc.Container([
 )
 def update_portfolio(n_clicks, selected_tickers, weight_str, aporte_inicial):
     
+    # Esta função (callback) não precisou de quase nenhuma mudança,
+    # pois a lógica de cálculo (dot product) funciona igual
+    # para 1 ou N ativos.
+    
     empty_fig = go.Figure().update_layout(
         template="plotly_white",
         title="Selecione as ações e clique em 'Simular'",
@@ -193,13 +229,12 @@ def update_portfolio(n_clicks, selected_tickers, weight_str, aporte_inicial):
         yaxis_tickprefix="R$ "
     )
     
-    
     style_output = {'display': 'none'}
-    
     
     if n_clicks == 0:
         return empty_fig, [], "", style_output 
 
+    # Validação dos inputs (sem mudança)
     if not selected_tickers:
         return empty_fig, [], "Erro: Nenhuma ação selecionada.", style_output
 
@@ -220,6 +255,7 @@ def update_portfolio(n_clicks, selected_tickers, weight_str, aporte_inicial):
 
     
     try:
+        # Lógica de cálculo (sem mudança)
         retornos_selecionados = df_retornos[selected_tickers]
         retorno_portfolio = retornos_selecionados.dot(pesos)
         
@@ -242,14 +278,14 @@ def update_portfolio(n_clicks, selected_tickers, weight_str, aporte_inicial):
         return empty_fig, [], f"Erro no cálculo: {e}", style_output
 
     
-    
+    # Plotagem do Gráfico (sem mudança)
     fig = go.Figure()
     
     fig.add_trace(go.Scatter(
         x=valor_portfolio.index,
         y=valor_portfolio,
         mode='lines',
-        name='Meu Portfólio',
+        name='Meu Portfólio (IBOV)', # Nome atualizado
         line=dict(color="#0d6efd") 
     ))
     
@@ -273,6 +309,7 @@ def update_portfolio(n_clicks, selected_tickers, weight_str, aporte_inicial):
     )
     
     
+    # Cards de Métricas (sem mudança)
     def create_metric_card(title, value, color_class="text-dark"):
         return dbc.Card(
             dbc.CardBody([
@@ -287,17 +324,13 @@ def update_portfolio(n_clicks, selected_tickers, weight_str, aporte_inicial):
         
         dbc.Col(create_metric_card("Valor Final (Portfólio)", f"R$ {valor_final_portfolio:,.2f}", "text-success"), md=6),
         dbc.Col(create_metric_card("Valor Final (SELIC)", f"R$ {valor_final_selic:,.2f}", "text-primary"), md=6),
-        
         dbc.Col(create_metric_card("Volatilidade (a.a.)", f"{volatilidade:.2%}", "text-warning"), md=6),
-        
         dbc.Col(create_metric_card("Sharpe Ratio", f"{sharpe_ratio:.2f}", "text-info"), md=6),
     ]
 
-    
     style_output = {'display': 'block'}
     
     return fig, metrics_display, "", style_output
-
 
 
 if __name__ == '__main__':
