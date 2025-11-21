@@ -1,90 +1,154 @@
 import dash
 import dash_bootstrap_components as dbc
-from dash import dcc, html, Input, Output, State
+from dash import dcc, html, Input, Output, State, ALL, ctx
 import plotly.graph_objs as go
 import pandas as pd
 import numpy as np
-import requests # <--- ADICIONADO
+import requests
 
-# --- INÍCIO DA MODIFICAÇÃO: Carregando dados da API ---
+# --- 1. CONFIGURAÇÃO E CARREGAMENTO DE DADOS ---
 
-# URLs da API (garanta que o docker-compose do B3-pipeline está rodando)
-API_IBOV_URL = "http://localhost:5001/api/ibov"
-API_SELIC_URL = "http://localhost:5001/api/selic"
+# Dicionário de Endpoints (Ativos de Renda Variável)
+ATIVOS_ENDPOINTS = {
+    'IBOV': 'http://localhost:5001/api/ticker/ibov',
+    'PETR4': 'http://localhost:5001/api/ticker/petr4_sa',
+    'VALE3': 'http://localhost:5001/api/ticker/vale3_sa',
+    'ITUB4': 'http://localhost:5001/api/ticker/itub4_sa',
+    'ABEV3': 'http://localhost:5001/api/ticker/abev3_sa',
+    'BBAS3': 'http://localhost:5001/api/ticker/bbas3_sa',
+    'WEGE3': 'http://localhost:5001/api/ticker/wege3_sa',
+    'PRIO3': 'http://localhost:5001/api/ticker/prio3_sa'
+}
 
-def fetch_api_data(url):
-    """Busca dados da API e retorna um DataFrame."""
+# Endpoint da SELIC (Renda Fixa / Benchmark)
+API_SELIC_URL = "http://localhost:5001/api/ticker/selic"
+
+def fetch_api_data(url, timeout=5):
+    """Busca dados da API de forma resiliente."""
     try:
-        response = requests.get(url)
-        # Gera um erro para status ruins (ex: 404, 500)
-        response.raise_for_status() 
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
         data = response.json()
         df = pd.DataFrame.from_records(data)
         return df
     except requests.exceptions.RequestException as e:
-        print(f"ERRO AO ACESSAR API {url}: {e}")
-        print("Certifique-se que o 'docker-compose up' do B3-pipeline está em execução.")
-        return pd.DataFrame() # Retorna DF vazio em caso de erro
+        print(f"   [ERRO] Falha na conexão com {url}: {e}")
+        return pd.DataFrame()
 
-# 1. Carregar Dados do IBOV
-print("Carregando dados do IBOV via API...")
-df_ibov = fetch_api_data(API_IBOV_URL)
-if not df_ibov.empty:
-    df_ibov['Date'] = pd.to_datetime(df_ibov['Date'])
-    df_ibov = df_ibov.set_index('Date')
-    # A app espera um DataFrame com tickers como colunas. Usaremos 'Close' do IBOV.
-    # Renomeamos 'Close' para 'IBOV' para ficar claro no dashboard.
-    df_precos = df_ibov[['Close']].rename(columns={'Close': 'IBOV'})
+# --- 1.1 Processamento dos Ativos (Renda Variável) ---
+print("\n=== INICIANDO CARGA DE DADOS ===")
+
+dfs_ativos = []
+
+for ticker, url in ATIVOS_ENDPOINTS.items():
+    print(f" -> Carregando {ticker}...")
+    df_temp = fetch_api_data(url)
+    
+    if not df_temp.empty:
+        df_temp.columns = [c.lower() for c in df_temp.columns]
+        if 'close' in df_temp.columns:
+            if 'date' in df_temp.columns:
+                df_temp['date'] = pd.to_datetime(df_temp['date'], errors='coerce')
+                df_temp = df_temp.set_index('date')
+            df_ativo = df_temp[['close']].rename(columns={'close': ticker})
+            dfs_ativos.append(df_ativo)
+    else:
+        print(f"    [AVISO] {ticker}: Sem dados disponíveis na API.")
+
+# Consolida Ativos
+if dfs_ativos:
+    df_precos = pd.concat(dfs_ativos, axis=1).dropna() 
+    print(f" -> Sucesso! {len(dfs_ativos)} ativos carregados e sincronizados.")
 else:
-    print("ERRO: Não foi possível carregar dados do IBOV. Dashboard pode não funcionar.")
+    print(" -> [ERRO CRÍTICO] Nenhum ativo carregado. O dashboard ficará vazio.")
     df_precos = pd.DataFrame()
 
-# 2. Carregar Dados da SELIC
-print("Carregando dados da SELIC via API...")
-df_selic_raw = fetch_api_data(API_SELIC_URL)
-if not df_selic_raw.empty:
-    # Renomear colunas da API ('Date', 'Value') para bater com a lógica original do script ('data', 'valor')
-    df_selic_raw = df_selic_raw.rename(columns={'Date': 'data', 'Value': 'valor'})
-    
-    # Processamento da SELIC (lógica mantida do script original)
-    df_selic = df_selic_raw.copy()
-    df_selic['data'] = pd.to_datetime(df_selic['data']) # API já retorna ISO
-    df_selic = df_selic.set_index('data')
-    # A API retorna o valor percentual (ex: 0.0419), dividimos por 100 para ter o retorno diário
-    df_selic['retorno_diario'] = pd.to_numeric(df_selic['valor']) / 100
-    retornos_selic_global = df_selic['retorno_diario']
-    dias_uteis = 252
-    taxa_selic_anual_mock = retornos_selic_global.mean() * dias_uteis # Renomeado para 'taxa_selic_anual'
+if not df_precos.empty:
+    df_retornos = df_precos.pct_change().dropna()
+    disponiveis_lista = df_precos.columns.tolist()
 else:
-    print("ERRO: Não foi possível carregar dados da SELIC. Benchmark pode não funcionar.")
-    retornos_selic_global = pd.Series(dtype=float)
-    taxa_selic_anual_mock = 0.0 # Renomeado para 'taxa_selic_anual'
-
-# 3. Calcular Retornos (lógica mantida)
-df_retornos = df_precos.pct_change().dropna()
-disponiveis_lista = df_precos.columns # Agora será apenas ['IBOV']
-
-# --- FIM DA MODIFICAÇÃO ---
+    df_retornos = pd.DataFrame()
+    disponiveis_lista = []
 
 
+# --- 1.2 Processamento da SELIC (Benchmark) ---
+print(" -> Carregando Benchmark (SELIC)...")
+df_selic_raw = fetch_api_data(API_SELIC_URL)
+
+taxa_selic_anual_mock = 0.10 # Fallback de segurança
+retornos_selic_global = pd.Series(dtype=float)
+
+if not df_selic_raw.empty:
+    try:
+        cols = [c.lower() for c in df_selic_raw.columns]
+        df_selic_raw.columns = cols
+        
+        if 'date' in df_selic_raw.columns:
+            # Formato específico para a SELIC (dd/mm/yyyy)
+            df_selic_raw['date'] = pd.to_datetime(df_selic_raw['date'], format='%d/%m/%Y', errors='coerce')
+            df_selic_raw = df_selic_raw.dropna(subset=['date']).set_index('date')
+
+        # Lógica para Valor da Selic (Value ou Close)
+        if 'value' in df_selic_raw.columns:
+            df_selic_raw['retorno_diario'] = pd.to_numeric(df_selic_raw['value'], errors='coerce') / 100
+            retornos_selic_global = df_selic_raw['retorno_diario'].dropna()
+        elif 'close' in df_selic_raw.columns:
+             df_selic_raw['retorno_diario'] = df_selic_raw['close'].pct_change()
+             retornos_selic_global = df_selic_raw['retorno_diario'].dropna()
+
+        if not retornos_selic_global.empty:
+            dias_uteis = 252
+            taxa_selic_anual_mock = retornos_selic_global.mean() * dias_uteis
+            print(f" -> Sucesso! SELIC carregada (Taxa Média: {taxa_selic_anual_mock:.2%})")
+    except Exception as e:
+        print(f"    [ERRO] Falha ao processar SELIC: {e}")
+else:
+    print("    [AVISO] API da SELIC vazia. Usando taxa fixa de 10%.")
+
+print("=== CARGA FINALIZADA ===\n")
+
+
+# --- 2. APP DASH ---
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.BOOTSTRAP])
 server = app.server
 
-# Atualiza a lista de ações disponíveis (agora só tem IBOV)
+# Lista de opções para o Dropdown
 acoes_disponiveis = [{'label': t, 'value': t} for t in disponiveis_lista]
+
+# --- Layout dos Badges Clicáveis ---
+# Geramos os badges dinamicamente com Pattern Matching ID
+badges_layout = []
+if disponiveis_lista:
+    for ticker in disponiveis_lista:
+        badges_layout.append(
+            dbc.Badge(
+                ticker, 
+                id={'type': 'asset-badge', 'index': ticker}, # ID Dinâmico
+                n_clicks=0,
+                color="success" if ticker != 'IBOV' else "primary", 
+                className="me-2 mb-2 p-2",
+                style={"cursor": "pointer", "userSelect": "none"} # Cursor de mãozinha
+            )
+        )
+else:
+    badges_layout = [html.P("Nenhum ativo carregado. Verifique a API.", className="text-danger")]
+
 
 app.layout = dbc.Container([
     
+    # Título
     dbc.Row(dbc.Col(html.H2([html.I(className="bi bi-graph-up me-2"), "Simulador de Portfólio Interativo (B3)"]), width=12, className="text-center my-4")),
+    
+    # Card 1: Ativos Disponíveis (Agora Clicáveis)
     dbc.Row(
         dbc.Col(
             dbc.Card(
                 [
-                    dbc.CardHeader([html.I(className="bi bi-archive-fill me-2"), "Ativos Disponíveis (Via API)"]),
+                    dbc.CardHeader([html.I(className="bi bi-archive-fill me-2"), "Ativos Disponíveis (Clique para detalhes)"]),
                     dbc.CardBody(
                         [
-                            # Atualizado para mostrar o ativo da API
-                            html.Span([dbc.Badge(ticker, color="primary", className="me-2 mb-2") for ticker in disponiveis_lista])
+                            html.P("Clique em um ativo para ver sua evolução individual:", className="text-muted small mb-2"),
+                            html.Div(badges_layout)
                         ]
                     )
                 ],
@@ -94,7 +158,7 @@ app.layout = dbc.Container([
         )
     ),
     
-    
+    # Card 2: Configurações
     dbc.Row(
         dbc.Col(
             dbc.Card(
@@ -105,29 +169,32 @@ app.layout = dbc.Container([
                             dbc.Row(className="g-3", children=[
                                 dbc.Col(
                                     [
-                                        html.Label("Selecione as Ações:", className="form-label"),
+                                        html.Label("Selecione os Ativos:", className="form-label fw-bold"),
                                         dcc.Dropdown(
                                             id='stock-selector',
                                             options=acoes_disponiveis,
-                                            value=['IBOV'], # <--- MODIFICADO (Default é IBOV)
-                                            multi=True
+                                            value=['IBOV'] if 'IBOV' in disponiveis_lista else [],
+                                            multi=True,
+                                            placeholder="Escolha ações para compor a carteira..."
                                         )
                                     ], md=5
                                 ),
                                 dbc.Col(
                                     [
-                                        html.Label("Defina os Pesos (ex: 1.0):", className="form-label"),
+                                        html.Label("Pesos (separados por vírgula):", className="form-label fw-bold"),
                                         dcc.Input(
                                             id='weight-inputs',
                                             type='text',
-                                            value='1.0', # <--- MODIFICADO (Default é 1.0)
+                                            value='1.0',
+                                            placeholder="Ex: 0.5, 0.5",
                                             className="form-control"
-                                        )
+                                        ),
+                                        dbc.FormText("A soma deve ser 1.0 (100%)")
                                     ], md=4
                                 ),
                                 dbc.Col(
                                     [
-                                        html.Label("Aporte Inicial (R$):", className="form-label"),
+                                        html.Label("Aporte Inicial (R$):", className="form-label fw-bold"),
                                         dcc.Input(
                                             id='aporte-input',
                                             type='number',
@@ -142,13 +209,13 @@ app.layout = dbc.Container([
                                 dbc.Col(
                                     [
                                         dbc.Button(
-                                            [html.I(className="bi bi-play-circle me-2"), "Simular Portfólio"],
+                                            [html.I(className="bi bi-play-circle me-2"), "Simular Carteira"],
                                             id='run-button', 
                                             n_clicks=0, 
                                             color="primary",
-                                            className="w-100 mt-4" 
+                                            className="w-100 mt-4 fw-bold" 
                                         ),
-                                        html.Div(id='error-message', className="text-danger mt-3 text-center")
+                                        html.Div(id='error-message', className="text-danger mt-3 text-center fw-bold")
                                     ],
                                     width=12
                                 )
@@ -161,10 +228,9 @@ app.layout = dbc.Container([
         )
     ),
     
-    
+    # Card 3: Resultados
     dbc.Row(
         dbc.Col(
-            
             html.Div(
                 id='results-container',
                 style={'display': 'none'}, 
@@ -174,10 +240,7 @@ app.layout = dbc.Container([
                             dbc.CardHeader([html.I(className="bi bi-bar-chart-line-fill me-2"), "Resultados da Simulação"]),
                             dbc.CardBody(
                                 [
-                                    
                                     dbc.Row(id='metrics-output', className="mb-4 g-3"), 
-                                    
-                                    
                                     dbc.Row(
                                         dbc.Col(
                                             dcc.Loading(
@@ -194,18 +257,102 @@ app.layout = dbc.Container([
                                 ]
                             )
                         ],
-                        className="mt-4" 
+                        className="mt-4 shadow-sm" 
                     )
                 ]
             ),
             width=12
         )
-    )
+    ),
     
-], fluid=True, className="p-4")
+    # --- MODAL DE DETALHES DO ATIVO ---
+    dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle(id="modal-title")),
+            dbc.ModalBody(
+                dcc.Loading(
+                    id="loading-modal",
+                    type="dot",
+                    children=dcc.Graph(id="modal-graph")
+                )
+            ),
+            dbc.ModalFooter(
+                dbc.Button("Fechar", id="close-modal", className="ms-auto", n_clicks=0)
+            ),
+        ],
+        id="asset-modal",
+        size="lg", # Grande
+        is_open=False,
+    ),
+    
+], fluid=True, className="p-4 bg-light")
 
 
+# --- 3. CALLBACKS ---
 
+# CALLBACK 1: Modal de Detalhes do Ativo
+@app.callback(
+    [Output("asset-modal", "is_open"),
+     Output("modal-title", "children"),
+     Output("modal-graph", "figure")],
+    [Input({'type': 'asset-badge', 'index': ALL}, 'n_clicks'),
+     Input("close-modal", "n_clicks")],
+    [State("asset-modal", "is_open")]
+)
+def toggle_asset_modal(n_clicks_badges, n_click_close, is_open):
+    # Descobre quem disparou o callback
+    triggered_id = ctx.triggered_id
+    
+    # Se nada disparou (inicialização) ou se não há dados
+    if not triggered_id or df_precos.empty:
+        return False, "", go.Figure()
+
+    # Se foi o botão de fechar
+    if triggered_id == "close-modal":
+        return False, "", go.Figure()
+    
+    # Se foi um badge (o ID é um dicionário {'type':..., 'index': 'PETR4'})
+    if isinstance(triggered_id, dict) and triggered_id['type'] == 'asset-badge':
+        ticker_selecionado = triggered_id['index']
+        
+        # Verifica se o clique foi real (n_clicks > 0)
+        # O Dash dispara callbacks na inicialização com n_clicks=0 ou None
+        # Precisamos verificar se algum dos badges tem n_clicks > 0
+        if not any(c for c in n_clicks_badges if c):
+             return is_open, "", go.Figure()
+
+        # Gera o gráfico do ativo
+        try:
+            df_ativo = df_precos[ticker_selecionado]
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=df_ativo.index, 
+                y=df_ativo, 
+                mode='lines', 
+                name=ticker_selecionado,
+                line=dict(color="#0d6efd")
+            ))
+            
+            fig.update_layout(
+                title=f"Evolução Histórica: {ticker_selecionado}",
+                xaxis_title="Data",
+                yaxis_title="Preço de Fechamento (R$)",
+                yaxis_tickprefix="R$ ",
+                template="plotly_white",
+                hovermode="x unified",
+                margin=dict(l=40, r=20, t=40, b=40)
+            )
+            
+            return True, f"Detalhes: {ticker_selecionado}", fig
+            
+        except KeyError:
+            return is_open, "Erro ao carregar dados", go.Figure()
+
+    return is_open, "", go.Figure()
+
+
+# CALLBACK 2: Simulação do Portfólio (Mantido)
 @app.callback(
     [Output('portfolio-graph', 'figure'),
      Output('metrics-output', 'children'),
@@ -218,10 +365,6 @@ app.layout = dbc.Container([
 )
 def update_portfolio(n_clicks, selected_tickers, weight_str, aporte_inicial):
     
-    # Esta função (callback) não precisou de quase nenhuma mudança,
-    # pois a lógica de cálculo (dot product) funciona igual
-    # para 1 ou N ativos.
-    
     empty_fig = go.Figure().update_layout(
         template="plotly_white",
         title="Selecione as ações e clique em 'Simular'",
@@ -229,109 +372,112 @@ def update_portfolio(n_clicks, selected_tickers, weight_str, aporte_inicial):
         yaxis_tickprefix="R$ "
     )
     
-    style_output = {'display': 'none'}
+    style_hidden = {'display': 'none'}
+    style_visible = {'display': 'block'}
     
     if n_clicks == 0:
-        return empty_fig, [], "", style_output 
+        return empty_fig, [], "", style_hidden
 
-    # Validação dos inputs (sem mudança)
+    # Validações básicas
     if not selected_tickers:
-        return empty_fig, [], "Erro: Nenhuma ação selecionada.", style_output
+        return empty_fig, [], "Erro: Nenhuma ação selecionada.", style_hidden
 
     if aporte_inicial is None or aporte_inicial <= 0:
-        return empty_fig, [], "Erro: Aporte inicial deve ser um número positivo.", style_output
+        return empty_fig, [], "Erro: Aporte inicial inválido.", style_hidden
         
     try:
-        pesos_list = [float(w.strip()) for w in weight_str.split(',')]
+        clean_weight_str = weight_str.replace(";", ",") 
+        pesos_list = [float(w.strip()) for w in clean_weight_str.split(',')]
         pesos = np.array(pesos_list)
-    except Exception as e:
-        return empty_fig, [], "Erro: Formato dos pesos inválido. Use números separados por vírgula (ex: 0.6, 0.4).", style_output
+    except Exception:
+        return empty_fig, [], "Erro: Formato dos pesos incorreto. Use números separados por vírgula.", style_hidden
 
     if len(pesos) != len(selected_tickers):
-        return empty_fig, [], f"Erro: Você selecionou {len(selected_tickers)} ações, mas forneceu {len(pesos)} pesos.", style_output
+        return empty_fig, [], f"Erro: Você selecionou {len(selected_tickers)} ativos, mas informou {len(pesos)} pesos.", style_hidden
     
-    if not np.isclose(np.sum(pesos), 1.0):
-        return empty_fig, [], f"Erro: A soma dos pesos deve ser 1.0 (soma atual: {np.sum(pesos):.2f}).", style_output
+    if not np.isclose(np.sum(pesos), 1.0, atol=0.01): 
+        return empty_fig, [], f"Erro: A soma dos pesos deve ser 1.0 (Soma atual: {np.sum(pesos):.2f}).", style_hidden
 
-    
     try:
-        # Lógica de cálculo (sem mudança)
+        # --- CÁLCULOS FINANCEIROS ---
         retornos_selecionados = df_retornos[selected_tickers]
         retorno_portfolio = retornos_selecionados.dot(pesos)
         
-        volatilidade = retorno_portfolio.std() * np.sqrt(dias_uteis)
-        retorno_medio_anual = retorno_portfolio.mean() * dias_uteis
-        sharpe_ratio = (retorno_medio_anual - taxa_selic_anual_mock) / volatilidade 
+        volatilidade = retorno_portfolio.std() * np.sqrt(252)
+        retorno_medio_anual = retorno_portfolio.mean() * 252
+        sharpe_ratio = (retorno_medio_anual - taxa_selic_anual_mock) / volatilidade if volatilidade > 0 else 0
         
-        retornos_selic_alinhados = retornos_selic_global.reindex(retorno_portfolio.index).ffill()
+        # Benchmark Simulado
+        val_media_diaria = 0
+        if not retornos_selic_global.empty:
+            val_media_diaria = retornos_selic_global.mean()
+        elif taxa_selic_anual_mock > 0:
+             val_media_diaria = taxa_selic_anual_mock / 252
+             
+        retornos_selic_simulados = pd.Series(val_media_diaria, index=retorno_portfolio.index)
+
+        # Performance Acumulada
+        perf_cum_port = (1 + retorno_portfolio).cumprod()
+        perf_cum_selic = (1 + retornos_selic_simulados).cumprod()
         
-        performance_cumulativa_port = (1 + retorno_portfolio).cumprod()
-        performance_cumulativa_selic = (1 + retornos_selic_alinhados).cumprod()
+        valor_portfolio = perf_cum_port * aporte_inicial
+        valor_selic = perf_cum_selic * aporte_inicial
         
-        valor_portfolio = performance_cumulativa_port * aporte_inicial
-        valor_selic = performance_cumulativa_selic * aporte_inicial
-        
-        valor_final_portfolio = valor_portfolio.iloc[-1]
+        valor_final_port = valor_portfolio.iloc[-1]
         valor_final_selic = valor_selic.iloc[-1]
+        retorno_total_pct = (valor_final_port / aporte_inicial) - 1
 
     except Exception as e:
-        return empty_fig, [], f"Erro no cálculo: {e}", style_output
+        return empty_fig, [], f"Erro no cálculo financeiro: {str(e)}", style_hidden
 
-    
-    # Plotagem do Gráfico (sem mudança)
+    # --- GRÁFICOS E VISUAL ---
     fig = go.Figure()
     
     fig.add_trace(go.Scatter(
-        x=valor_portfolio.index,
-        y=valor_portfolio,
-        mode='lines',
-        name='Meu Portfólio (IBOV)', # Nome atualizado
-        line=dict(color="#0d6efd") 
+        x=valor_portfolio.index, y=valor_portfolio,
+        mode='lines', name='Minha Carteira',
+        line=dict(color="#0d6efd", width=2)
     ))
     
     fig.add_trace(go.Scatter(
-        x=valor_selic.index,
-        y=valor_selic,
-        mode='lines',
-        name='Benchmark (SELIC)',
-        line=dict(color="#6c757d", dash="dot") 
+        x=valor_selic.index, y=valor_selic,
+        mode='lines', name='Benchmark (SELIC Média)',
+        line=dict(color="#6c757d", dash="dot", width=2)
     ))
     
     fig.update_layout(
-        title="Performance Histórica: Portfólio vs. Benchmark",
+        title="Evolução Patrimonial Comparativa",
         xaxis_title="Data",
-        yaxis_title="Valor (R$)",
+        yaxis_title="Valor Patrimonial (R$)",
         yaxis_tickprefix="R$ ",
         yaxis_separatethousands=True,
         hovermode="x unified",
         template="plotly_white",
-        legend_title_text='Legenda'
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=40, r=40, t=60, b=40)
     )
     
-    
-    # Cards de Métricas (sem mudança)
-    def create_metric_card(title, value, color_class="text-dark"):
+    def create_metric_card(title, value, color_text="text-dark", subtext=None):
         return dbc.Card(
             dbc.CardBody([
-                html.H6(title, className="card-subtitle text-muted"),
-                html.P(value, className=f"card-text fs-4 {color_class}")
+                html.H6(title, className="card-subtitle text-muted mb-2 small text-uppercase fw-bold"),
+                html.P(value, className=f"card-text fs-4 fw-bold {color_text} mb-0"),
+                html.Small(subtext, className="text-muted") if subtext else None
             ]),
-            className="text-center",
-            color="light" 
+            className="text-center shadow-sm h-100 border-0",
+            color="light"
         )
 
+    cor_resultado = "text-success" if valor_final_port >= valor_final_selic else "text-danger"
+
     metrics_display = [
-        
-        dbc.Col(create_metric_card("Valor Final (Portfólio)", f"R$ {valor_final_portfolio:,.2f}", "text-success"), md=6),
-        dbc.Col(create_metric_card("Valor Final (SELIC)", f"R$ {valor_final_selic:,.2f}", "text-primary"), md=6),
-        dbc.Col(create_metric_card("Volatilidade (a.a.)", f"{volatilidade:.2%}", "text-warning"), md=6),
-        dbc.Col(create_metric_card("Sharpe Ratio", f"{sharpe_ratio:.2f}", "text-info"), md=6),
+        dbc.Col(create_metric_card("Saldo Final", f"R$ {valor_final_port:,.2f}", cor_resultado, f"Retorno: {retorno_total_pct:.1%}"), md=3, sm=6),
+        dbc.Col(create_metric_card("Benchmark (SELIC)", f"R$ {valor_final_selic:,.2f}", "text-secondary"), md=3, sm=6),
+        dbc.Col(create_metric_card("Volatilidade (a.a.)", f"{volatilidade:.1%}", "text-warning"), md=3, sm=6),
+        dbc.Col(create_metric_card("Sharpe Ratio", f"{sharpe_ratio:.2f}", "text-info"), md=3, sm=6),
     ]
-
-    style_output = {'display': 'block'}
     
-    return fig, metrics_display, "", style_output
-
+    return fig, metrics_display, "", style_visible
 
 if __name__ == '__main__':
     app.run(debug=True)
