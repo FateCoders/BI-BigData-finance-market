@@ -1,129 +1,125 @@
 # Projeto 3A: Pipeline de Dados da B3 com Airflow e DuckDB
 
 ## 1. Descrição do Projeto
-
-Este projeto faz parte da iniciativa **Engenharia de Big Data: Projeto 3A**.  
-O objetivo é construir um pipeline de dados gratuito para captura, processamento e armazenamento de informações financeiras da **B3**.
-
-O pipeline utiliza **Apache Airflow** para orquestração, **Docker** para execução containerizada e **DuckDB** como sistema de armazenamento analítico local.
+Este projeto tem como objetivo construir um pipeline para captura, processamento e armazenamento de dados financeiros da B3
 
 ---
 
 ## 2. Tecnologias Utilizadas
 
-- **Orquestração:** Apache Airflow
-- **Ambiente de Execução:** Docker e Docker Compose
-- **Fonte de Dados:** API yfinance (Yahoo Finance), obtendo dados do índice IBOVESPA (^BVSP)
-- **Processamento (ETL):** Python com Pandas e yfinance
-- **Armazenamento de Staging:** Parquet
-- **Armazenamento Analítico:** DuckDB
+| Camada               | Tecnologia                     | Finalidade                                      |
+|----------------------|--------------------------------|-------------------------------------------------|
+| Orquestração         | Apache Airflow                 | Agendamento e monitoramento de workflows       |
+| Ambiente             | Docker + Docker Compose        | Containerização e reprodutibilidade             |
+| Fonte de Dados       | yfinance (Yahoo Finance)       | Extração de cotações do ^BVSP                   |
+| Processamento (ETL)  | Python + Pandas                | Transformação dos dados                         |
+| Staging              | Arquivos Parquet               | Armazenamento intermediário eficiente           |
+| Armazenamento OLAP   | DuckDB                         | Banco analítico local (arquivo .duckdb)         |
 
 ---
 
-## 3. Arquitetura e Funcionamento do Ambiente
+## 3. Arquitetura do Ambiente (Docker Compose)
 
-O ambiente é containerizado com **Docker Compose**, permitindo isolamento e reprodutibilidade.  
-Os componentes principais do Airflow são definidos no arquivo `docker-compose.yaml`.
+| Serviço              | Função                                                                 |
+|----------------------|------------------------------------------------------------------------|
+| `airflow-scheduler`  | Monitora e dispara as DAGs conforme o schedule                         |
+| `airflow-webserver`  | Interface web → [http://localhost:8080](http://localhost:8080)         |
+| `airflow-worker`     | Executa as tarefas das DAGs                                            |
+| `airflow-init`       | Inicializa o metadata DB e cria usuário admin                          |
+| `postgres`           | Banco de metadados do Airflow                                          |
+| `redis`              | Message broker (CeleryExecutor)                                        |
 
-### 3.1. Serviços do Docker
-
-- **airflow-scheduler:** Monitora e executa DAGs conforme o agendamento.
-- **airflow-webserver:** Fornece a interface de usuário (UI) em [http://localhost:8080](http://localhost:8080).
-- **airflow-worker:** Executa as tarefas definidas nas DAGs.
-- **airflow-init:** Serviço de inicialização para preparar o banco de dados e as configurações iniciais.
-- **postgres:** Armazena os metadados do Airflow (DAGs, execuções e conexões).
-- **redis:** Atua como message broker entre os serviços.
-
-### 3.2. Mapeamento de Volumes
-
-Os volumes mapeiam diretórios locais para os containers do Airflow:
-
-- `./dags`: Contém os arquivos Python das DAGs.
-- `./plugins`: Contém módulos auxiliares, como `b3_processing.py`.
-- `./data`: Armazena os arquivos Parquet e o banco DuckDB.
-- `./logs`: Armazena os registros de execução das tarefas.
+### Volumes mapeados (importante para persistência)
+```text
+./dags      → /opt/airflow/dags
+./plugins   → /opt/airflow/plugins
+./data      → /opt/airflow/data      ← arquivos Parquet + DuckDB
+./logs      → /opt/airflow/logs
+```
 
 ---
 
-## 4. Workflow do Pipeline (DAGs)
+## 4. Workflow do Pipeline (DAGs com Datasets)
 
-O pipeline é composto por duas DAGs integradas por **Datasets**.  
-A segunda DAG é acionada automaticamente após a primeira concluir sua execução com sucesso.
+O pipeline possui duas DAGs encadeadas automaticamente via Airflow Datasets.
 
-### 4.1. DAG 1 — `pipeline_yfinance_to_parquet`
-
-- **Função:** Extrai dados históricos do IBOVESPA (^BVSP) por meio da API do Yahoo Finance.
+### 4.1 DAG 1 – `pipeline_yfinance_to_parquet`
 - **Arquivo:** `dags/pipeline_yfinance_to_parquet.py`
-- **Agendamento:** `@daily`
-- **Saída:** `Dataset("file:///opt/airflow/data/ibov_dados_brutos.parquet")`
-- **Configuração de Resiliência:** `retries=2`, `retry_delay=timedelta(minutes=5)`
+- **Agendamento:** `@daily` (executa todo dia às 00:00)
+- **Tarefa principal:** baixar dados históricos do ^BVSP via yfinance
+- **Saída:** `data/ibov_dados_brutos.parquet`
+- **Dataset produzido:**  
+  `Dataset("file:///opt/airflow/data/ibov_dados_brutos.parquet")`
+- **Resiliência:** 2 retentativas, delay de 5 minutos
 
-### 4.2. DAG 2 — `pipeline_parquet_to_duckdb`
-
-- **Função:** Lê o arquivo Parquet bruto, realiza limpeza (remoção de valores nulos, arredondamento e deduplicação) e insere os dados tratados no DuckDB.
+### 4.2 DAG 2 – `pipeline_parquet_to_duckdb`
 - **Arquivo:** `dags/pipeline_parquet_to_duckdb.py`
-- **Agendamento:** `schedule=[raw_parquet_dataset]` (acionamento automático)
-- **Saída:** Tabela `ibov_limpo` dentro de `data/ibov_limpo.duckdb`
-- **Configuração de Resiliência:** `retries=2`
+- **Agendamento:** `schedule=[raw_parquet_dataset]` → **acionada automaticamente** quando o Parquet é gerado
+- **Transformações realizadas:**
+  - Remoção de linhas com valores nulos nas colunas principais
+  - Arredondamento dos preços para 2 casas decimais
+  - Deduplicação por data
+  - Ordenação cronológica
+- **Saída final:** tabela `ibov_limpo` no arquivo `data/ibov_limpo.duckdb`
+- **Resiliência:** 2 retentativas
 
 ---
 
-## 5. Execução do Ambiente e do Pipeline
+## 5. Como Rodar o Ambiente
 
-### 5.1. Inicialização do Banco de Dados do Airflow
-
-O comando abaixo realiza o download das imagens necessárias e inicializa o banco de dados do Airflow em um container:
-
+### 5.1 Passo 1 – Inicializar o banco de metadados do Airflow
 ```bash
-docker-compose up airflow-init
+docker compose up airflow-init
 ```
 
-### 5.2. Inicialização dos Serviços do Airflow
-
-Para iniciar todos os serviços (webserver, scheduler, banco de dados):
-
+### 5.2 Passo 2 – Subir todos os serviços em background
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
-Os containers ativos podem ser verificados no **Docker Desktop** ou via terminal.
-
-### 5.3. Acesso à Interface Web do Airflow
-
-Acesse [http://localhost:8080](http://localhost:8080) para abrir a interface web.  
-As credenciais padrão são:
-
-- **Login:** `admin`
+### 5.3 Passo 3 – Acessar a UI do Airflow
+URL: [http://localhost:8080](http://localhost:8080)  
+Credenciais padrão:
+- **Usuário:** `admin`
 - **Senha:** `admin`
 
-Caso as credenciais estejam incorretas, utilize o comando abaixo para criar o usuário administrador:
-
+Caso precise recriar o usuário admin:
 ```bash
-docker-compose exec airflow-scheduler airflow users create -r Admin -u admin -e admin@example.com -f admin -l user -p admin
+docker compose exec airflow-scheduler airflow users create \
+    -r Admin -u admin -e admin@example.com -f Admin -l User -p admin
 ```
 
-### 5.4. Execução das DAGs
-
-1. Localize as DAGs `pipeline_yfinance_to_parquet` e `pipeline_parquet_to_duckdb` na interface.
-2. Ative ambas utilizando o botão **Toggle**.
-3. Para execução manual, clique em **Play → Trigger DAG**.
-4. Acompanhe a execução pela aba **Grid**.
-
-Após a conclusão da DAG 1, a DAG 2 é acionada automaticamente via dependência de Dataset.
+### 5.4 Passo 4 – Executar o pipeline
+1. Na UI, ative (toggle ON) as duas DAGs:
+   - `pipeline_yfinance_to_parquet`
+   - `pipeline_parquet_to_duckdb`
+2. Dispare manualmente a primeira DAG
+3. A segunda DAG será acionada automaticamente assim que o Parquet for gerado
 
 ---
 
-## 6. Verificação dos Dados
+## 6. Verificação dos Dados Gerados
 
-Os dados processados são gravados no banco **DuckDB**.  
-Para leitura, utilize o script:
+Arquivos criados na pasta `./data`:
+- `ibov_dados_brutos.parquet` → staging bruto
+- `ibov_limpo.duckdb`         → banco analítico final
 
+Para visualizar o conteúdo do DuckDB rapidamente:
 ```bash
-# A partir da raiz do projeto B3-pipeline
 python scripts/read_duckdb.py
 ```
 
-Arquivos gerados na pasta `data/`:
+Exemplo de consulta direta via terminal:
+```sql
+duckdb data/ibov_limpo.duckdb "SELECT * FROM ibov_limpo ORDER BY date DESC LIMIT 10"
+```
 
-- `ibov_dados_brutos.parquet`
-- `ibov_limpo.duckdb`
+---
+
+## 7. API REST (FastAPI) – Consulta dos Dados Tratados
+
+| Endpoint                     | Descrição                                                                 | Exemplo de retorno |
+|------------------------------|---------------------------------------------------------------------------|--------------------|
+| `GET /api/tickers`           | Lista todos os arquivos `*limpo.duckdb` disponíveis                       | `{"tickers": ["ibov", "selic", ...]}` |
+| `GET /api/ticker/<ticker_id>`| Retorna todo o conteúdo da tabela `<ticker_id>_limpo` em JSON             | Dados históricos completos |
+| `GET /api/selic`             | Endpoint legado → redireciona internamente para `/api/ticker/selic`      | Mantém compatibilidade com sistemas antigos |
